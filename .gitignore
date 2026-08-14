@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+venv/
+.env
+.venv/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Datasets
+datasets/
+
+# Model files
+*.pt
+*.pth
+*.ckpt
+
+# VS Code settings
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
