@@ -1,28 +1,23 @@
-
-import warnings
-
-warnings.filterwarnings("ignore", category=UserWarning)
-import pandas as pd
-import numpy as np
-import os
 import io
-import re
-from tqdm import trange, tqdm
 
 import torch
 import torch.nn as nn
-from torch import optim
-from torch.utils.data import DataLoader
-from torch.utils.data.dataset import Dataset
-import torch.nn.functional as F
-from torch.distributions import Categorical
 
-from torchtext.datasets import WikiText2, EnWik9, AG_NEWS
-from torchtext.data.utils import get_tokenizer
 from torchtext.vocab import build_vocab_from_iterator
-import torchtext.transforms as T
 from torchtext.data.functional import sentencepiece_tokenizer, load_sp_model
-from torchtext.data.functional import generate_sp_model
+
+
+TOKENIZER_MODEL_PATH = "my_tokenizer.model"
+TOKENIZER_VOCAB_PATH = "my_tokenizer.vocab"
+
+PAD_IDX, SOS_IDX, EOS_IDX, UNK_IDX = 0, 1, 2, 3
+
+EMB_SIZE = 256
+HIDDEN_SIZE = 1024
+NUM_LAYERS = 2
+MAX_LEN = 64
+
+
 
 
 learning_rate = 1e-4
@@ -40,6 +35,24 @@ def yield_token(file_path):
     with io.open(file_path, encoding='utf-8') as f:
         for line in f:
             yield [line.split("\t")[0]]
+
+
+def load_tokenizer_and_vocab(vocab_path=TOKENIZER_VOCAB_PATH, model_path=TOKENIZER_MODEL_PATH):
+    sp_model = load_sp_model(model_path)
+
+    tokenizer = sentencepiece_tokenizer(sp_model)
+
+    vocab = build_vocab_from_iterator(
+        yield_token(vocab_path),
+        specials=['<pad>', '<sos>', '<eos>', '<unk>'],
+        special_first=True
+    )
+
+    vocab.set_default_index(vocab['<unk>'])
+    return tokenizer,vocab
+    
+
+
 
 
 class LSTM(nn.Module):
@@ -65,6 +78,11 @@ class LSTM(nn.Module):
             nn.ELU(),
             nn.Linear(hidden_size//2,num_emb)
         )
+        
+    def init_hidden(self, batch_size, device):
+        hidden = torch.zeros(self.num_layers, batch_size, self.hidden_size, device=device)
+        memory = torch.zeros(self.num_layers, batch_size, self.hidden_size, device=device)
+        return hidden, memory
 
 
     def forward(self,input_seq,hidd,memo):
@@ -76,25 +94,6 @@ class LSTM(nn.Module):
 
 
 
-class AGNews(Dataset):
-
-    def __init__(self,test_train):
-        self.df = pd.read_csv(os.path.join(dataset_root,"datasets/AG_NEWS/"+test_train+".csv"),names=["Class", "Title", "Content"])
-
-        self.df.fillna("",inplace=True)
-
-        self.df["Article"] = self.df["Title"] + ":" + self.df["Content"]
-
-        self.df.drop(["Title","Content"],axis=1,inplace=True)
-
-        self.df['Article'] = self.df['Article'].str.replace(r'\\n|\\|\\r|\\r\\n|\n|"', ' ', regex=True)
-
-
-    def __getitem__(self, index):
-        return self.df.iloc[index]["Article"].lower()
-
-    def __len__(self):
-        return len(self.df)
 
 
 class TokenDrop(nn.Module):
@@ -151,43 +150,7 @@ def main():
 
 
 
-    dataset_train = AGNews("train")
-    dataset_test = AGNews("test")
 
-
-    train_loader = DataLoader(dataset_train,batch_size=batch_size,shuffle=True,num_workers=0,drop_last=True)
-    test_loader = DataLoader(dataset_test,batch_size=batch_size,shuffle=True,num_workers=0)
-
-    sp_model = load_sp_model("my_tokenizer.model")
-
-    tokenizer = sentencepiece_tokenizer(sp_model)
-
-    # for testing the tokenizer
-    # for token in tokenizer(["unbelievable"]):
-    #     print(token)
-
-
-
-
-
-    vocab = build_vocab_from_iterator(
-        yield_token("my_tokenizer.vocab"),
-        specials=['<pad>', '<sos>', '<eos>', '<unk>'],
-        special_first=True
-    )
-
-    vocab.set_default_index(vocab['<unk>'])
-
-
-
-    train_transform = T.Sequential(
-        T.SentencePieceTokenizer("my_tokenizer.model"),
-        T.VocabTransform(vocab=vocab),
-        T.AddToken(1,begin=True),
-        T.Truncate(max_seq_len=max_len),
-        T.AddToken(2,begin=False),
-        T.ToTensor(padding_value=0)
-    )
 
     gen_transform = T.Sequential(
         T.SentencePieceTokenizer("my_tokenizer.model"),
@@ -197,26 +160,10 @@ def main():
     )
 
 
-    device = ("cuda" if torch.cuda.is_available() else "cpu")
 
-    emb_size = 256
-    hidden_size = 1024
-
-    # Define number of layers for the LSTM model
-    num_layers = 2
-
-    lstm_generator = LSTM(num_emb=len(vocab),num_layers=num_layers,emb_size=emb_size,hidden_size=hidden_size).to(device)
+   
 
 
-    optimizer = optim.Adam(lstm_generator.parameters(),lr=learning_rate,weight_decay=1e-4)
-
-    loss_fn = nn.CrossEntropyLoss(ignore_index=0)
-
-    t = TokenDrop(prob=0.1)
-
-    training_loss_logger = []
-
-    entropy_logger = []
 
 
 
@@ -260,6 +207,28 @@ def main():
                     "num_layers": num_layers, "num_emb": len(vocab)},
         }, "checkpoint.pt")
 
+        # Validation loss: same loss calculation as training, but on
+        # dataset_test (articles the model never learns from), with no
+        # TokenDrop noise and no backward()/optimizer.step().
+        lstm_generator.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for val_text in test_loader:
+                val_text_tokens = train_transform(list(val_text)).to(device)
+                val_bs = val_text_tokens.shape[0]
+
+                val_input_text = val_text_tokens[:, 0:-1]
+                val_output_text = val_text_tokens[:, 1:]
+
+                val_hidden = torch.zeros(num_layers, val_bs, hidden_size, device=device)
+                val_memory = torch.zeros(num_layers, val_bs, hidden_size, device=device)
+
+                val_pred, val_hidden, val_memory = lstm_generator(val_input_text, val_hidden, val_memory)
+                val_loss += loss_fn(val_pred.transpose(1, 2), val_output_text).item()
+
+        print(f"Epoch {epoch + 1}/{nepochs} - val loss: {val_loss / len(test_loader):.4f}")
+        lstm_generator.train()
+
     index = 0
 
     temp = 0.9
@@ -289,6 +258,13 @@ def main():
             
             if input_tokens.item() == 2:
                 break
+    
+    generated_ids = torch.cat(log_tokens,dim=1).flatten().tolist()
+    
+    tokens = vocab.lookup_tokens(generated_ids)
+    sentence = "".join(tokens).replace("▁", " ").strip()
+    print(sentence)
+    
 
 
 if __name__ == "__main__":
