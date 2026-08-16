@@ -18,19 +18,6 @@ NUM_LAYERS = 2
 MAX_LEN = 64
 
 
-
-
-learning_rate = 1e-4
-
-nepochs = 20
-
-batch_size = 32
-
-max_len = 64
-
-dataset_root = "./datasets"
-
-
 def yield_token(file_path):
     with io.open(file_path, encoding='utf-8') as f:
         for line in f:
@@ -59,6 +46,8 @@ class LSTM(nn.Module):
 
     def __init__(self, num_emb, num_layers=1,emb_size=128,hidden_size=128):
         super(LSTM,self).__init__()
+        self.num_layers = num_layers
+        self.hidden_size = hidden_size
 
         self.embdding = nn.Embedding(num_emb,emb_size)
 
