@@ -12,6 +12,7 @@ venv/
 
 # Datasets
 datasets/
+assets/
 
 # Model files
 *.pt
